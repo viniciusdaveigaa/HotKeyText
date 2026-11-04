@@ -19,8 +19,8 @@ using Microsoft.Win32;
 [assembly: AssemblyTitle("HotKeyText")]
 [assembly: AssemblyDescription("Atalho rápido de textos via Scroll Lock com atualização automática pelo GitHub")]
 [assembly: AssemblyProduct("HotKeyText")]
-[assembly: AssemblyVersion("1.0.0.0")]
-[assembly: AssemblyFileVersion("1.0.0.0")]
+[assembly: AssemblyVersion("1.1.0.0")]
+[assembly: AssemblyFileVersion("1.1.0.0")]
 
 public class TextoItem
 {
@@ -31,7 +31,7 @@ public class TextoItem
 public class Config
 {
     public bool ModoColar = false;
-    public string GithubRepo = "";
+    public bool TemaEscuro = true;
     public List<TextoItem> Textos = new List<TextoItem>();
 }
 
@@ -77,8 +77,9 @@ static class Nativo
 
 static class App
 {
-    public const string VERSAO = "1.0.0";
-    public static string REPO_PADRAO = "viniciusdaveigaa/HotKeyText"; // pode ser preenchido ou lido de repo.txt na pasta do programa
+    public const string VERSAO = "1.1.0";
+    // Repositório GitHub embutido automaticamente — sem qualquer configuração manual
+    public const string GITHUB_REPO = "viniciusdaveigaa/HotKeyText";
 
     public static Config Cfg = new Config();
     public static string PastaDados, ArquivoDados;
@@ -241,32 +242,6 @@ static class App
         catch { }
     }
 
-    public static string ObterRepoEfetivo()
-    {
-        if (!string.IsNullOrEmpty(Cfg.GithubRepo) && Cfg.GithubRepo.Trim().Length > 0)
-            return NormalizarRepo(Cfg.GithubRepo);
-        try
-        {
-            string arqRepo = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "repo.txt");
-            if (File.Exists(arqRepo))
-            {
-                string lido = File.ReadAllText(arqRepo, Encoding.UTF8).Trim();
-                if (lido.Length > 0) return NormalizarRepo(lido);
-            }
-        }
-        catch { }
-        return NormalizarRepo(REPO_PADRAO);
-    }
-
-    public static string NormalizarRepo(string s)
-    {
-        if (string.IsNullOrEmpty(s)) return "";
-        s = s.Trim();
-        s = Regex.Replace(s, @"^https?://(www\.)?github\.com/", "", RegexOptions.IgnoreCase);
-        s = Regex.Replace(s, @"\.git$", "", RegexOptions.IgnoreCase);
-        return s.Trim('/');
-    }
-
     // ---------- dados ----------
 
     static void Carregar()
@@ -278,7 +253,6 @@ static class App
                 XmlSerializer xs = new XmlSerializer(typeof(Config));
                 using (FileStream fs = File.OpenRead(ArquivoDados)) Cfg = (Config)xs.Deserialize(fs);
                 if (Cfg.Textos == null) Cfg.Textos = new List<TextoItem>();
-                if (Cfg.GithubRepo == null) Cfg.GithubRepo = "";
                 return;
             }
             catch (Exception ex)
@@ -645,6 +619,47 @@ static class App
         return bmp;
     }
 
+    public static Bitmap DesenharEngrenagem(int size, Color cor)
+    {
+        Bitmap bmp = new Bitmap(size, size);
+        using (Graphics g = Graphics.FromImage(bmp))
+        {
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            float cx = size / 2f;
+            float cy = size / 2f;
+            float rOuter = size * 0.42f;
+            float rInner = size * 0.29f;
+            float rHole = size * 0.15f;
+
+            using (Pen penDente = new Pen(cor, Math.Max(2f, size * 0.13f)))
+            {
+                penDente.StartCap = LineCap.Round;
+                penDente.EndCap = LineCap.Round;
+                for (int i = 0; i < 8; i++)
+                {
+                    double ang = i * Math.PI / 4.0;
+                    float x1 = cx + (float)(Math.Cos(ang) * (rInner * 0.75f));
+                    float y1 = cy + (float)(Math.Sin(ang) * (rInner * 0.75f));
+                    float x2 = cx + (float)(Math.Cos(ang) * rOuter);
+                    float y2 = cy + (float)(Math.Sin(ang) * rOuter);
+                    g.DrawLine(penDente, x1, y1, x2, y2);
+                }
+            }
+
+            using (SolidBrush br = new SolidBrush(cor))
+            {
+                g.FillEllipse(br, cx - rInner, cy - rInner, rInner * 2f, rInner * 2f);
+            }
+
+            g.CompositingMode = CompositingMode.SourceCopy;
+            using (SolidBrush trans = new SolidBrush(Color.Transparent))
+            {
+                g.FillEllipse(trans, cx - rHole, cy - rHole, rHole * 2f, rHole * 2f);
+            }
+        }
+        return bmp;
+    }
+
     static Icon CriarIcone()
     {
         try
@@ -664,7 +679,7 @@ static class App
     }
 }
 
-// ---------- Sistema de Atualização via GitHub Releases ----------
+// ---------- Sistema de Atualização Automática via GitHub Releases ----------
 
 static class Atualizador
 {
@@ -674,24 +689,16 @@ static class Atualizador
         public bool TemNovaVersao;
         public string VersaoRemota = "";
         public string UrlDownload = "";
-        public string Notas = "";
         public string Erro = "";
     }
 
-    public static ResultadoUpdate Verificar(string repo)
+    public static ResultadoUpdate Verificar()
     {
         ResultadoUpdate res = new ResultadoUpdate();
-        repo = App.NormalizarRepo(repo);
-        if (string.IsNullOrEmpty(repo) || !repo.Contains("/"))
-        {
-            res.Erro = "Informe o repositório GitHub no formato usuario/HotKeyText.";
-            return res;
-        }
-
         try
         {
             ServicePointManager.SecurityProtocol = (SecurityProtocolType)3072 | (SecurityProtocolType)768; // TLS 1.2 / 1.1
-            string url = "https://api.github.com/repos/" + repo + "/releases/latest";
+            string url = "https://api.github.com/repos/" + App.GITHUB_REPO + "/releases/latest";
             HttpWebRequest req = (HttpWebRequest)WebRequest.Create(url);
             req.UserAgent = "HotKeyText-Updater/" + App.VERSAO;
             req.Accept = "application/vnd.github.v3+json";
@@ -712,7 +719,6 @@ static class Atualizador
             string tag = mTag.Groups[1].Value.Trim();
             res.VersaoRemota = tag.TrimStart('v', 'V');
 
-            // Procura o asset HotKeyText.exe (ou qualquer .exe anexado à release)
             MatchCollection mUrls = Regex.Matches(json, "\"browser_download_url\"\\s*:\\s*\"([^\"]+\\.exe)\"", RegexOptions.IgnoreCase);
             foreach (Match m in mUrls)
             {
@@ -729,7 +735,7 @@ static class Atualizador
         {
             HttpWebResponse hr = wex.Response as HttpWebResponse;
             if (hr != null && hr.StatusCode == HttpStatusCode.NotFound)
-                res.Erro = "Repositório '" + repo + "' ainda não possui nenhuma Release publicada no GitHub.";
+                res.Erro = "Nenhuma Release publicada ainda em github.com/" + App.GITHUB_REPO + ".";
             else
                 res.Erro = "Falha ao conectar ao GitHub: " + wex.Message;
             return res;
@@ -784,7 +790,6 @@ static class Atualizador
                 sOut.Write(buf, 0, lidos);
         }
 
-        // Verifica assinatura MZ mínima de executável válido
         byte[] cab = new byte[2];
         using (FileStream fs = File.OpenRead(exeUpdate)) fs.Read(cab, 0, 2);
         if (cab[0] != 'M' || cab[1] != 'Z')
@@ -801,7 +806,7 @@ static class Atualizador
     }
 }
 
-// ---------- Lista flutuante do Scroll Lock ----------
+// ---------- Lista flutuante do Scroll Lock (segue o Tema Claro/Escuro) ----------
 
 class PopupForm : Form
 {
@@ -813,19 +818,14 @@ class PopupForm : Form
     Font fCab, fTitulo, fPrev, fBadge, fRodape;
     Bitmap bmpLogo;
 
-    static readonly Color Fundo = Color.FromArgb(32, 33, 38);
-    static readonly Color Hover = Color.FromArgb(54, 56, 64);
-    static readonly Color Borda = Color.FromArgb(72, 74, 84);
     static readonly Color Azul = Color.FromArgb(0, 120, 212);
-    static readonly Color Cinza = Color.FromArgb(165, 168, 178);
-    static readonly Color Link = Color.FromArgb(96, 170, 255);
 
     public PopupForm()
     {
         FormBorderStyle = FormBorderStyle.None;
         ShowInTaskbar = false;
         StartPosition = FormStartPosition.Manual;
-        BackColor = Fundo;
+        BackColor = Color.FromArgb(32, 33, 38);
         Text = "HotKeyText";
         SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
         using (Graphics g = CreateGraphics()) S = g.DpiX / 96f;
@@ -906,53 +906,61 @@ class PopupForm : Form
 
     protected override void OnPaint(PaintEventArgs e)
     {
+        bool esc = App.Cfg.TemaEscuro;
+        Color cFundo = esc ? Color.FromArgb(32, 33, 38) : Color.FromArgb(250, 251, 253);
+        Color cHover = esc ? Color.FromArgb(54, 56, 64) : Color.FromArgb(228, 239, 252);
+        Color cBorda = esc ? Color.FromArgb(72, 74, 84) : Color.FromArgb(205, 210, 218);
+        Color cTexto = esc ? Color.White : Color.FromArgb(25, 26, 30);
+        Color cCinza = esc ? Color.FromArgb(165, 168, 178) : Color.FromArgb(105, 110, 122);
+        Color cLink  = esc ? Color.FromArgb(96, 170, 255) : Color.FromArgb(0, 102, 204);
+
         Graphics g = e.Graphics;
         g.SmoothingMode = SmoothingMode.AntiAlias;
-        g.Clear(Fundo);
+        g.Clear(cFundo);
         TextFormatFlags esq = TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix;
         TextFormatFlags centro = TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix;
 
         if (bmpLogo != null)
             g.DrawImage(bmpLogo, pad + P(8), (cabecalhoH - bmpLogo.Height) / 2);
 
-        TextRenderer.DrawText(g, "HotKeyText", fCab, new Rectangle(pad + P(36), 0, Width - 2 * pad, cabecalhoH), Color.White, esq);
+        TextRenderer.DrawText(g, "HotKeyText", fCab, new Rectangle(pad + P(36), 0, Width - 2 * pad, cabecalhoH), cTexto, esq);
 
         List<TextoItem> t = App.Cfg.Textos;
         if (t.Count == 0)
             TextRenderer.DrawText(g, "Nenhum texto cadastrado. Clique em Gerenciar.", fPrev,
-                new Rectangle(pad + P(8), cabecalhoH, Width - 2 * pad, linhaH), Cinza, esq);
+                new Rectangle(pad + P(8), cabecalhoH, Width - 2 * pad, linhaH), cCinza, esq);
 
         for (int i = 0; i < t.Count && i < linhas.Count; i++)
         {
             Rectangle r = linhas[i];
             if (i == Destaque)
                 using (GraphicsPath p = App.Arredondado(r, P(6)))
-                using (SolidBrush b = new SolidBrush(Hover))
+                using (SolidBrush b = new SolidBrush(cHover))
                     g.FillPath(b, p);
 
             int bs = P(28);
             Rectangle rb = new Rectangle(r.X + P(8), r.Y + (r.Height - bs) / 2, bs, bs);
             string rot = App.RotuloDoIndice(i);
             using (GraphicsPath p = App.Arredondado(rb, P(5)))
-            using (SolidBrush b = new SolidBrush(rot.Length > 0 ? Azul : Borda))
+            using (SolidBrush b = new SolidBrush(rot.Length > 0 ? Azul : cBorda))
                 g.FillPath(b, p);
             TextRenderer.DrawText(g, rot, fBadge, rb, Color.White, centro);
 
             int tx = rb.Right + P(12);
             int tw = r.Right - tx - P(8);
-            TextRenderer.DrawText(g, App.TituloDe(t[i]), fTitulo, new Rectangle(tx, r.Y + P(3), tw, r.Height / 2 - P(2)), Color.White, esq);
-            TextRenderer.DrawText(g, App.ResumoDe(t[i]), fPrev, new Rectangle(tx, r.Y + r.Height / 2, tw, r.Height / 2 - P(3)), Cinza, esq);
+            TextRenderer.DrawText(g, App.TituloDe(t[i]), fTitulo, new Rectangle(tx, r.Y + P(3), tw, r.Height / 2 - P(2)), cTexto, esq);
+            TextRenderer.DrawText(g, App.ResumoDe(t[i]), fPrev, new Rectangle(tx, r.Y + r.Height / 2, tw, r.Height / 2 - P(3)), cCinza, esq);
         }
 
         int fy = Height - rodapeH;
-        using (Pen pen = new Pen(Borda)) g.DrawLine(pen, pad, fy, Width - pad, fy);
+        using (Pen pen = new Pen(cBorda)) g.DrawLine(pen, pad, fy, Width - pad, fy);
         Size sz = TextRenderer.MeasureText("Gerenciar", fRodape);
         rGerenciar = new Rectangle(Width - pad - P(8) - sz.Width, fy, sz.Width, rodapeH);
-        TextRenderer.DrawText(g, "Gerenciar", fRodape, rGerenciar, Link, centro);
+        TextRenderer.DrawText(g, "Gerenciar", fRodape, rGerenciar, cLink, centro);
         TextRenderer.DrawText(g, "Tecla do texto, Enter ou clique para inserir  •  Esc fecha", fRodape,
-            new Rectangle(pad + P(8), fy, rGerenciar.X - pad - P(16), rodapeH), Cinza, esq);
+            new Rectangle(pad + P(8), fy, rGerenciar.X - pad - P(16), rodapeH), cCinza, esq);
 
-        using (Pen pen = new Pen(Borda)) g.DrawRectangle(pen, 0, 0, Width - 1, Height - 1);
+        using (Pen pen = new Pen(cBorda)) g.DrawRectangle(pen, 0, 0, Width - 1, Height - 1);
     }
 
     int Acertar(Point p)
@@ -985,18 +993,18 @@ class GerenciadorForm : Form
 {
     float S = 1f;
     ListBox lista;
-    TextBox txtTitulo, txtConteudo, txtRepo;
-    Button bNovo, bExcluir, bSubir, bDescer, bAtualizar;
-    Label lblStatusUpdate;
+    TextBox txtTitulo, txtConteudo;
+    Button bNovo, bExcluir, bSubir, bDescer, bEngrenagem;
+    Label lblNomeApp, lblVersaoApp, lblStatusUpdate, lblLista, lblTitulo, lblConteudo, lblModo, dica;
     RadioButton rDigitar, rColar;
     CheckBox chkIniciar;
+    ContextMenuStrip menuEngrenagem;
+    ToolStripMenuItem itemTemaClaro, itemTemaEscuro, itemProcurarUpdate;
     System.Windows.Forms.Timer timerSalvar;
     bool carregando;
     Font fItem, fItemPrev, fBadge, fNegrito, fHeader;
 
     static readonly Color Azul = Color.FromArgb(0, 120, 212);
-    static readonly Color Selecao = Color.FromArgb(229, 241, 251);
-    static readonly Color CinzaTexto = Color.FromArgb(110, 110, 120);
 
     int P(float v) { return (int)Math.Round(v * S); }
 
@@ -1013,9 +1021,8 @@ class GerenciadorForm : Form
         fItemPrev = new Font("Segoe UI", 8.5f);
         fBadge = new Font("Segoe UI Semibold", 9.5f);
         StartPosition = FormStartPosition.CenterScreen;
-        ClientSize = new Size(P(900), P(620));
-        MinimumSize = new Size(P(700), P(480));
-        BackColor = Color.White;
+        ClientSize = new Size(P(880), P(600));
+        MinimumSize = new Size(P(680), P(480));
 
         SuspendLayout();
 
@@ -1026,14 +1033,14 @@ class GerenciadorForm : Form
         raiz.Padding = new Padding(P(14));
         raiz.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, P(300)));
         raiz.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        raiz.RowStyles.Add(new RowStyle(SizeType.AutoSize)); // cabeçalho com logo e botão de update
+        raiz.RowStyles.Add(new RowStyle(SizeType.AutoSize)); // cabeçalho com logo e versão
         raiz.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        raiz.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        raiz.RowStyles.Add(new RowStyle(SizeType.AutoSize)); // rodapé com engrenagem no canto inferior esquerdo
 
-        // ----- barra superior: Logo + Nome + Versão + Atualização GitHub -----
+        // ----- barra superior: Logo + Nome + Versão + Status de atualização -----
         Panel topo = new Panel();
         topo.Dock = DockStyle.Fill;
-        topo.Height = P(46);
+        topo.Height = P(44);
         topo.Margin = new Padding(0, 0, 0, P(10));
 
         PictureBox picLogo = new PictureBox();
@@ -1041,53 +1048,24 @@ class GerenciadorForm : Form
         picLogo.SizeMode = PictureBoxSizeMode.AutoSize;
         picLogo.Location = new Point(0, P(4));
 
-        Label lblNomeApp = new Label();
+        lblNomeApp = new Label();
         lblNomeApp.Text = "HotKeyText";
         lblNomeApp.Font = fHeader;
         lblNomeApp.AutoSize = true;
         lblNomeApp.Location = new Point(P(44), P(2));
 
-        Label lblVersaoApp = new Label();
+        lblVersaoApp = new Label();
         lblVersaoApp.Text = "v" + App.VERSAO;
-        lblVersaoApp.ForeColor = CinzaTexto;
         lblVersaoApp.AutoSize = true;
-        lblVersaoApp.Location = new Point(P(46), P(26));
-
-        FlowLayoutPanel barraGit = new FlowLayoutPanel();
-        barraGit.AutoSize = true;
-        barraGit.FlowDirection = FlowDirection.RightToLeft;
-        barraGit.WrapContents = false;
-        barraGit.Dock = DockStyle.Right;
-        barraGit.Padding = new Padding(0, P(6), 0, 0);
-
-        bAtualizar = Botao("Procurar Atualização");
-        bAtualizar.BackColor = Color.FromArgb(240, 246, 255);
-        bAtualizar.Click += delegate { ProcurarAtualizacao(); };
-
-        txtRepo = new TextBox();
-        txtRepo.Width = P(190);
-        txtRepo.Margin = new Padding(P(4), P(4), P(8), 0);
-        txtRepo.Text = App.ObterRepoEfetivo();
-        txtRepo.TextChanged += delegate
-        {
-            if (carregando) return;
-            App.Cfg.GithubRepo = txtRepo.Text.Trim();
-            AgendarSalvar();
-        };
-
-        Label lblRepo = new Label();
-        lblRepo.Text = "Repositório GitHub:";
-        lblRepo.AutoSize = true;
-        lblRepo.Margin = new Padding(0, P(7), P(2), 0);
-        lblRepo.ForeColor = CinzaTexto;
+        lblVersaoApp.Location = new Point(P(46), P(25));
 
         lblStatusUpdate = new Label();
         lblStatusUpdate.AutoSize = true;
-        lblStatusUpdate.Margin = new Padding(0, P(7), P(10), 0);
-        lblStatusUpdate.ForeColor = Azul;
+        lblStatusUpdate.Dock = DockStyle.Right;
+        lblStatusUpdate.TextAlign = ContentAlignment.MiddleRight;
+        lblStatusUpdate.Padding = new Padding(0, P(12), P(4), 0);
 
-        barraGit.Controls.AddRange(new Control[] { bAtualizar, txtRepo, lblRepo, lblStatusUpdate });
-        topo.Controls.AddRange(new Control[] { picLogo, lblNomeApp, lblVersaoApp, barraGit });
+        topo.Controls.AddRange(new Control[] { picLogo, lblNomeApp, lblVersaoApp, lblStatusUpdate });
 
         // ----- coluna esquerda: lista -----
         TableLayoutPanel esq = new TableLayoutPanel();
@@ -1099,7 +1077,7 @@ class GerenciadorForm : Form
         esq.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         esq.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 
-        Label lblLista = new Label();
+        lblLista = new Label();
         lblLista.Text = "Textos cadastrados";
         lblLista.Font = fNegrito;
         lblLista.AutoSize = true;
@@ -1145,7 +1123,7 @@ class GerenciadorForm : Form
         dir.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         dir.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
-        Label lblTitulo = new Label();
+        lblTitulo = new Label();
         lblTitulo.Text = "Título (aparece na lista)";
         lblTitulo.Font = fNegrito;
         lblTitulo.AutoSize = true;
@@ -1153,10 +1131,11 @@ class GerenciadorForm : Form
 
         txtTitulo = new TextBox();
         txtTitulo.Anchor = AnchorStyles.Left | AnchorStyles.Right;
+        txtTitulo.BorderStyle = BorderStyle.FixedSingle;
         txtTitulo.Margin = new Padding(0, 0, 0, P(14));
         txtTitulo.TextChanged += AoEditarTitulo;
 
-        Label lblConteudo = new Label();
+        lblConteudo = new Label();
         lblConteudo.Text = "Texto que será inserido";
         lblConteudo.Font = fNegrito;
         lblConteudo.AutoSize = true;
@@ -1168,6 +1147,7 @@ class GerenciadorForm : Form
         txtConteudo.AcceptsTab = true;
         txtConteudo.WordWrap = true;
         txtConteudo.ScrollBars = ScrollBars.Vertical;
+        txtConteudo.BorderStyle = BorderStyle.FixedSingle;
         txtConteudo.Dock = DockStyle.Fill;
         txtConteudo.Font = new Font("Segoe UI", 10.5f);
         txtConteudo.Margin = new Padding(0);
@@ -1185,14 +1165,49 @@ class GerenciadorForm : Form
         dir.Controls.Add(lblConteudo, 0, 2);
         dir.Controls.Add(txtConteudo, 0, 3);
 
-        // ----- rodapé: opções -----
+        // ----- rodapé: Engrenagem no canto inferior esquerdo + opções -----
+        TableLayoutPanel rodape = new TableLayoutPanel();
+        rodape.Dock = DockStyle.Fill;
+        rodape.AutoSize = true;
+        rodape.ColumnCount = 2;
+        rodape.RowCount = 1;
+        rodape.Margin = new Padding(0, P(12), 0, 0);
+        rodape.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        rodape.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+
+        // Menu da engrenagem (Tema: Claro / Escuro + Procurar Atualização)
+        menuEngrenagem = new ContextMenuStrip();
+        ToolStripMenuItem menuTema = new ToolStripMenuItem("Tema");
+        itemTemaClaro = new ToolStripMenuItem("Claro", null, delegate { DefinirTema(false); });
+        itemTemaEscuro = new ToolStripMenuItem("Escuro", null, delegate { DefinirTema(true); });
+        menuTema.DropDownItems.Add(itemTemaClaro);
+        menuTema.DropDownItems.Add(itemTemaEscuro);
+
+        itemProcurarUpdate = new ToolStripMenuItem("Procurar Atualização", null, delegate { ProcurarAtualizacao(); });
+        menuEngrenagem.Items.Add(menuTema);
+        menuEngrenagem.Items.Add(new ToolStripSeparator());
+        menuEngrenagem.Items.Add(itemProcurarUpdate);
+
+        bEngrenagem = new Button();
+        bEngrenagem.Size = new Size(P(38), P(38));
+        bEngrenagem.FlatStyle = FlatStyle.Flat;
+        bEngrenagem.Cursor = Cursors.Hand;
+        bEngrenagem.Margin = new Padding(0, P(4), P(14), 0);
+        bEngrenagem.Anchor = AnchorStyles.Bottom | AnchorStyles.Left;
+        ToolTip tip = new ToolTip();
+        tip.SetToolTip(bEngrenagem, "Configurações (Tema e Atualização)");
+        bEngrenagem.Click += delegate
+        {
+            menuEngrenagem.Show(bEngrenagem, new Point(0, -menuEngrenagem.PreferredSize.Height - P(2)));
+        };
+
         FlowLayoutPanel opcoes = new FlowLayoutPanel();
         opcoes.AutoSize = true;
         opcoes.Dock = DockStyle.Fill;
         opcoes.WrapContents = true;
-        opcoes.Margin = new Padding(0, P(12), 0, 0);
+        opcoes.Margin = new Padding(0);
 
-        Label lblModo = new Label();
+        lblModo = new Label();
         lblModo.Text = "Modo:";
         lblModo.AutoSize = true;
         lblModo.Margin = new Padding(0, P(5), P(4), 0);
@@ -1208,22 +1223,23 @@ class GerenciadorForm : Form
         chkIniciar.Text = "Iniciar com o Windows";
         chkIniciar.AutoSize = true;
 
-        Label dica = new Label();
+        dica = new Label();
         dica.AutoSize = true;
-        dica.ForeColor = CinzaTexto;
-        dica.Margin = new Padding(0, P(8), 0, 0);
-        dica.Text = "Como usar: em qualquer programa, aperte Scroll Lock e depois a tecla do texto (1–9, 0, A–Z), Enter ou clique nele. Esc fecha.\r\n" +
-                    "Seus textos ficam salvos em %APPDATA%\\HotKeyText\\textos.xml e nunca são perdidos ao atualizar.";
+        dica.Margin = new Padding(0, P(6), 0, 0);
+        dica.Text = "Como usar: em qualquer programa, aperte Scroll Lock e depois a tecla do texto (1–9, 0, A–Z), Enter ou clique nele. Esc fecha.";
 
         opcoes.Controls.AddRange(new Control[] { lblModo, rDigitar, rColar, chkIniciar, dica });
         opcoes.SetFlowBreak(chkIniciar, true);
+
+        rodape.Controls.Add(bEngrenagem, 0, 0);
+        rodape.Controls.Add(opcoes, 1, 0);
 
         raiz.Controls.Add(topo, 0, 0);
         raiz.SetColumnSpan(topo, 2);
         raiz.Controls.Add(esq, 0, 1);
         raiz.Controls.Add(dir, 1, 1);
-        raiz.Controls.Add(opcoes, 0, 2);
-        raiz.SetColumnSpan(opcoes, 2);
+        raiz.Controls.Add(rodape, 0, 2);
+        raiz.SetColumnSpan(rodape, 2);
         Controls.Add(raiz);
 
         ResumeLayout(true);
@@ -1244,26 +1260,86 @@ class GerenciadorForm : Form
 
         FormClosing += delegate { timerSalvar.Stop(); App.Salvar(); };
 
+        AplicarTema();
         Recarregar(App.Cfg.Textos.Count > 0 ? 0 : -1);
+    }
+
+    void DefinirTema(bool escuro)
+    {
+        App.Cfg.TemaEscuro = escuro;
+        App.Salvar();
+        AplicarTema();
+        if (App.Popup != null && !App.Popup.IsDisposed) App.Popup.Invalidate();
+    }
+
+    void AplicarTema()
+    {
+        bool esc = App.Cfg.TemaEscuro;
+        itemTemaClaro.Checked = !esc;
+        itemTemaEscuro.Checked = esc;
+
+        try
+        {
+            int darkVal = esc ? 1 : 0;
+            Nativo.DwmSetWindowAttribute(Handle, 20, ref darkVal, 4); // barra de título escura/clara no Windows 10/11
+        }
+        catch { }
+
+        Color cFundo   = esc ? Color.FromArgb(28, 29, 34)   : Color.White;
+        Color cPainel  = esc ? Color.FromArgb(38, 40, 46)   : Color.White;
+        Color cBotao   = esc ? Color.FromArgb(46, 48, 56)   : Color.FromArgb(242, 244, 248);
+        Color cBorda   = esc ? Color.FromArgb(72, 75, 86)   : Color.FromArgb(204, 208, 216);
+        Color cTexto   = esc ? Color.FromArgb(240, 242, 246): Color.FromArgb(25, 26, 30);
+        Color cSub     = esc ? Color.FromArgb(165, 168, 178): Color.FromArgb(110, 110, 120);
+
+        BackColor = cFundo;
+        ForeColor = cTexto;
+
+        lblNomeApp.ForeColor = cTexto;
+        lblVersaoApp.ForeColor = cSub;
+        lblStatusUpdate.ForeColor = esc ? Color.FromArgb(100, 175, 255) : Azul;
+        lblLista.ForeColor = cTexto;
+        lblTitulo.ForeColor = cTexto;
+        lblConteudo.ForeColor = cTexto;
+        lblModo.ForeColor = cTexto;
+        rDigitar.ForeColor = cTexto;
+        rColar.ForeColor = cTexto;
+        chkIniciar.ForeColor = cTexto;
+        dica.ForeColor = cSub;
+
+        lista.BackColor = cPainel;
+        lista.ForeColor = cTexto;
+        lista.Invalidate();
+
+        txtTitulo.BackColor = cPainel;
+        txtTitulo.ForeColor = cTexto;
+        txtConteudo.BackColor = cPainel;
+        txtConteudo.ForeColor = cTexto;
+
+        foreach (Button b in new Button[] { bNovo, bExcluir, bSubir, bDescer })
+        {
+            b.FlatStyle = FlatStyle.Flat;
+            b.BackColor = cBotao;
+            b.ForeColor = cTexto;
+            b.FlatAppearance.BorderColor = cBorda;
+        }
+
+        bEngrenagem.BackColor = cBotao;
+        bEngrenagem.FlatAppearance.BorderColor = cBorda;
+        bEngrenagem.Image = App.DesenharEngrenagem(P(20), cTexto);
     }
 
     public void ProcurarAtualizacao()
     {
-        string repo = txtRepo.Text.Trim();
-        if (string.IsNullOrEmpty(repo)) repo = App.ObterRepoEfetivo();
-        App.Cfg.GithubRepo = App.NormalizarRepo(repo);
-        txtRepo.Text = App.Cfg.GithubRepo;
-        App.Salvar();
-
-        bAtualizar.Enabled = false;
-        lblStatusUpdate.Text = "Verificando no GitHub...";
+        itemProcurarUpdate.Enabled = false;
+        lblStatusUpdate.Text = "Procurando atualização no GitHub...";
 
         ThreadPool.QueueUserWorkItem(delegate
         {
-            Atualizador.ResultadoUpdate res = Atualizador.Verificar(repo);
+            Atualizador.ResultadoUpdate res = Atualizador.Verificar();
             BeginInvoke((Action)delegate
             {
-                bAtualizar.Enabled = true;
+                itemProcurarUpdate.Enabled = true;
                 if (!res.Sucesso)
                 {
                     lblStatusUpdate.Text = "";
@@ -1298,7 +1374,7 @@ class GerenciadorForm : Form
 
                 if (dr == DialogResult.Yes)
                 {
-                    bAtualizar.Enabled = false;
+                    itemProcurarUpdate.Enabled = false;
                     lblStatusUpdate.Text = "Baixando v" + res.VersaoRemota + "...";
                     ThreadPool.QueueUserWorkItem(delegate
                     {
@@ -1310,7 +1386,7 @@ class GerenciadorForm : Form
                         {
                             BeginInvoke((Action)delegate
                             {
-                                bAtualizar.Enabled = true;
+                                itemProcurarUpdate.Enabled = true;
                                 lblStatusUpdate.Text = "Falha ao atualizar";
                                 MessageBox.Show("Erro ao baixar/aplicar atualização: " + ex.Message,
                                     "HotKeyText", MessageBoxButtons.OK, MessageBoxIcon.Error);
@@ -1330,7 +1406,7 @@ class GerenciadorForm : Form
         b.AutoSizeMode = AutoSizeMode.GrowAndShrink;
         b.Padding = new Padding(P(8), P(3), P(8), P(3));
         b.Margin = new Padding(0, 0, P(6), 0);
-        b.UseVisualStyleBackColor = true;
+        b.Cursor = Cursors.Hand;
         return b;
     }
 
@@ -1437,11 +1513,17 @@ class GerenciadorForm : Form
     void DesenharItem(object s, DrawItemEventArgs e)
     {
         if (e.Index < 0 || e.Index >= App.Cfg.Textos.Count) return;
+        bool esc = App.Cfg.TemaEscuro;
+        Color cFundoItem = esc ? Color.FromArgb(38, 40, 46)  : Color.White;
+        Color cSelItem   = esc ? Color.FromArgb(52, 62, 78)  : Color.FromArgb(229, 241, 251);
+        Color cTitItem   = esc ? Color.FromArgb(240, 242, 246): Color.Black;
+        Color cSubItem   = esc ? Color.FromArgb(165, 168, 178): Color.FromArgb(110, 110, 120);
+
         Graphics g = e.Graphics;
         g.SmoothingMode = SmoothingMode.AntiAlias;
         bool sel = (e.State & DrawItemState.Selected) != 0;
         Rectangle r = e.Bounds;
-        using (SolidBrush b = new SolidBrush(sel ? Selecao : Color.White)) g.FillRectangle(b, r);
+        using (SolidBrush b = new SolidBrush(sel ? cSelItem : cFundoItem)) g.FillRectangle(b, r);
         if (sel) using (SolidBrush b = new SolidBrush(Azul)) g.FillRectangle(b, r.X, r.Y, P(3), r.Height);
 
         TextoItem t = App.Cfg.Textos[e.Index];
@@ -1457,7 +1539,7 @@ class GerenciadorForm : Form
         TextFormatFlags esq = TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix;
         int tx = rb.Right + P(10);
         int tw = r.Right - tx - P(6);
-        TextRenderer.DrawText(g, App.TituloDe(t), fItem, new Rectangle(tx, r.Y + P(3), tw, r.Height / 2 - P(2)), Color.Black, esq);
-        TextRenderer.DrawText(g, App.ResumoDe(t), fItemPrev, new Rectangle(tx, r.Y + r.Height / 2, tw, r.Height / 2 - P(3)), CinzaTexto, esq);
+        TextRenderer.DrawText(g, App.TituloDe(t), fItem, new Rectangle(tx, r.Y + P(3), tw, r.Height / 2 - P(2)), cTitItem, esq);
+        TextRenderer.DrawText(g, App.ResumoDe(t), fItemPrev, new Rectangle(tx, r.Y + r.Height / 2, tw, r.Height / 2 - P(3)), cSubItem, esq);
     }
 }
