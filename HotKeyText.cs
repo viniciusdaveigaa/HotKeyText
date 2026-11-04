@@ -17,16 +17,17 @@ using System.Xml.Serialization;
 using Microsoft.Win32;
 
 [assembly: AssemblyTitle("HotKeyText")]
-[assembly: AssemblyDescription("Atalho rápido de textos via Scroll Lock com suporte a WTS/RDP e atualização pelo GitHub")]
+[assembly: AssemblyDescription("Atalho rápido de textos via Scroll Lock com suporte a WTS/RDP, ocultação de texto sensível e atualização pelo GitHub")]
 [assembly: AssemblyProduct("HotKeyText")]
-[assembly: AssemblyVersion("1.2.0.0")]
-[assembly: AssemblyFileVersion("1.2.0.0")]
+[assembly: AssemblyVersion("1.3.0.0")]
+[assembly: AssemblyFileVersion("1.3.0.0")]
 
 public class TextoItem
 {
     public string Titulo = "";
     public string Conteudo = "";
     public string Atalho = ""; // Ex.: "1", "Shift+1", "Ctrl+Shift+2" (se vazio, usa o padrão da posição)
+    public bool OcultarTexto = false; // Quando true, oculta a prévia do texto na lista/popup e mascara o campo de edição
 }
 
 public class Config
@@ -82,7 +83,7 @@ static class Nativo
 
 static class App
 {
-    public const string VERSAO = "1.2.0";
+    public const string VERSAO = "1.3.0";
     // Repositório GitHub embutido automaticamente — sem qualquer configuração manual
     public const string GITHUB_REPO = "viniciusdaveigaa/HotKeyText";
 
@@ -173,8 +174,7 @@ static class App
                 MessageBox.Show("Não foi possível monitorar o teclado.", "HotKeyText", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
 
-            // Polling auxiliar para sessões WTS / Área de Trabalho Remota em tela cheia:
-            // quando o mstsc.exe captura o teclado antes do hook local, GetAsyncKeyState ainda detecta o Scroll Lock.
+            // Polling auxiliar para sessões WTS / Área de Trabalho Remota em tela cheia
             System.Windows.Forms.Timer timerWts = new System.Windows.Forms.Timer();
             timerWts.Interval = 35;
             timerWts.Tick += delegate
@@ -418,6 +418,7 @@ static class App
     public static string TituloDe(TextoItem t)
     {
         if (!string.IsNullOrEmpty(t.Titulo) && t.Titulo.Trim().Length > 0) return t.Titulo.Trim();
+        if (t.OcultarTexto) return "(sem título)";
         string c = (t.Conteudo ?? "").Trim();
         if (c.Length == 0) return "(sem título)";
         int q = c.IndexOfAny(new char[] { '\r', '\n' });
@@ -426,6 +427,7 @@ static class App
 
     public static string ResumoDe(TextoItem t)
     {
+        if (t.OcultarTexto) return "••••••••";
         string c = (t.Conteudo ?? "").Trim();
         if (c.Length == 0) return "(vazio)";
         if (c.Length > 300) c = c.Substring(0, 300);
@@ -576,8 +578,6 @@ static class App
         string texto = Cfg.Textos[idx].Conteudo ?? "";
         if (texto.Length == 0) return;
 
-        // Em conexões WTS / Área de Trabalho Remota (mstsc), pacotes KEYEVENTF_UNICODE sem scanCode são ignorados pelo canal RDP.
-        // Por isso, quando a janela ativa é WTS/RDP ou o Modo Colar está ativo, usamos colagem sincronizada com ScanCode real.
         if (Cfg.ModoColar || JanelaAtivaEhWtsOuRemota())
             Colar(texto);
         else
@@ -600,7 +600,7 @@ static class App
         i.type = 1;
         i.u.ki.wVk = vk;
         if (scan == 0 && vk != 0)
-            scan = (ushort)Nativo.MapVirtualKey(vk, 0); // ScanCode de hardware para compatibilidade com WTS/RDP
+            scan = (ushort)Nativo.MapVirtualKey(vk, 0);
         i.u.ki.wScan = scan;
         i.u.ki.dwFlags = flags;
         i.u.ki.extra = MARCA;
@@ -622,7 +622,6 @@ static class App
         {
             const uint UP = 2, UNI = 4;
             List<Nativo.INPUT> l = new List<Nativo.INPUT>();
-            // Se o usuário disparou com Shift+1 ou Ctrl+1, garante que os modificadores não atrapalhem o texto
             SoltarModificadoresPresos(l);
 
             foreach (char c in texto)
@@ -672,13 +671,11 @@ static class App
 
         ThreadPool.QueueUserWorkItem(delegate
         {
-            // Em WTS/RDP, aguarda 140 ms para o canal rdpclip sincronizar a área de transferência local com o servidor remoto
             if (ehWts) Thread.Sleep(140);
             else Thread.Sleep(25);
 
             List<Nativo.INPUT> l = new List<Nativo.INPUT>();
             SoltarModificadoresPresos(l);
-            // Ctrl (scan 0x1D) + V (scan 0x2F) com ScanCode de hardware para funcionar dentro do WTS/RDP
             l.Add(Tecla(0x11, 0x1D, 0));
             l.Add(Tecla(0x56, 0x2F, 0));
             l.Add(Tecla(0x56, 0x2F, 2));
@@ -954,7 +951,7 @@ static class Atualizador
     }
 }
 
-// ---------- Lista flutuante do Scroll Lock (segue o Tema Claro/Escuro e mostra o atalho customizado) ----------
+// ---------- Lista flutuante do Scroll Lock ----------
 
 class PopupForm : Form
 {
@@ -1145,8 +1142,8 @@ class GerenciadorForm : Form
     TextBox txtTitulo, txtAtalho, txtConteudo;
     Button bNovo, bExcluir, bSubir, bDescer, bPadraoAtalho, bEngrenagem;
     Label lblNomeApp, lblVersaoApp, lblStatusUpdate, lblLista, lblTitulo, lblAtalho, lblConteudo, lblModo, dica;
+    CheckBox chkExibirTexto, chkIniciar;
     RadioButton rDigitar, rColar;
-    CheckBox chkIniciar;
     ContextMenuStrip menuEngrenagem;
     ToolStripMenuItem itemTemaClaro, itemTemaEscuro, itemProcurarUpdate;
     System.Windows.Forms.Timer timerSalvar;
@@ -1261,7 +1258,7 @@ class GerenciadorForm : Form
         esq.Controls.Add(lista, 0, 1);
         esq.Controls.Add(botoes, 0, 2);
 
-        // ----- coluna direita: Título + Atalho configurável + Conteúdo -----
+        // ----- coluna direita: Título + Atalho configurável + Opção exibir/ocultar + Conteúdo -----
         TableLayoutPanel dir = new TableLayoutPanel();
         dir.Dock = DockStyle.Fill;
         dir.ColumnCount = 1;
@@ -1334,11 +1331,35 @@ class GerenciadorForm : Form
         linhaTopoDir.Controls.Add(txtAtalho, 1, 1);
         linhaTopoDir.Controls.Add(bPadraoAtalho, 2, 1);
 
+        // Cabeçalho do campo de conteúdo com opção de exibir/ocultar o texto na tela principal
+        TableLayoutPanel cabConteudo = new TableLayoutPanel();
+        cabConteudo.Dock = DockStyle.Fill;
+        cabConteudo.AutoSize = true;
+        cabConteudo.ColumnCount = 2;
+        cabConteudo.RowCount = 1;
+        cabConteudo.Margin = new Padding(0, 0, 0, P(4));
+        cabConteudo.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        cabConteudo.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+
         lblConteudo = new Label();
         lblConteudo.Text = "Texto que será inserido";
         lblConteudo.Font = fNegrito;
         lblConteudo.AutoSize = true;
-        lblConteudo.Margin = new Padding(0, 0, 0, P(4));
+        lblConteudo.Anchor = AnchorStyles.Left | AnchorStyles.Bottom;
+        lblConteudo.Margin = new Padding(0, P(2), 0, 0);
+
+        chkExibirTexto = new CheckBox();
+        chkExibirTexto.Text = "Exibir texto na tela principal";
+        chkExibirTexto.AutoSize = true;
+        chkExibirTexto.Checked = true;
+        chkExibirTexto.Cursor = Cursors.Hand;
+        chkExibirTexto.Anchor = AnchorStyles.Right | AnchorStyles.Bottom;
+        chkExibirTexto.Margin = new Padding(0);
+        tipAtalho.SetToolTip(chkExibirTexto, "Desmarque para ocultar senhas/textos sensíveis na lista principal, no popup e no campo de edição");
+        chkExibirTexto.CheckedChanged += AoAlternarExibirTexto;
+
+        cabConteudo.Controls.Add(lblConteudo, 0, 0);
+        cabConteudo.Controls.Add(chkExibirTexto, 1, 0);
 
         txtConteudo = new TextBox();
         txtConteudo.Multiline = true;
@@ -1360,7 +1381,7 @@ class GerenciadorForm : Form
         txtConteudo.KeyDown += selecionarTudo;
 
         dir.Controls.Add(linhaTopoDir, 0, 0);
-        dir.Controls.Add(lblConteudo, 0, 1);
+        dir.Controls.Add(cabConteudo, 0, 1);
         dir.Controls.Add(txtConteudo, 0, 2);
 
         // ----- rodapé: Engrenagem no canto inferior esquerdo + opções -----
@@ -1461,6 +1482,25 @@ class GerenciadorForm : Form
         Recarregar(App.Cfg.Textos.Count > 0 ? 0 : -1);
     }
 
+    void AoAlternarExibirTexto(object sender, EventArgs e)
+    {
+        if (carregando) return;
+        TextoItem t = Atual();
+        if (t == null) return;
+        t.OcultarTexto = !chkExibirTexto.Checked;
+        AplicarMascaraConteudo(t.OcultarTexto);
+        lista.Invalidate();
+        if (App.Popup != null && !App.Popup.IsDisposed) App.Popup.Invalidate();
+        App.Salvar();
+    }
+
+    void AplicarMascaraConteudo(bool ocultar)
+    {
+        char ch = ocultar ? '•' : '\0';
+        if (txtConteudo.PasswordChar != ch)
+            txtConteudo.PasswordChar = ch;
+    }
+
     void AoCapturarAtalho(object sender, KeyEventArgs e)
     {
         e.SuppressKeyPress = true;
@@ -1483,7 +1523,6 @@ class GerenciadorForm : Form
         string combo = App.FormatarCombinacao(e.Control, e.Alt, e.Shift, vk);
         if (string.IsNullOrEmpty(combo)) return;
 
-        // Garante que não haja outro item usando o mesmo atalho
         int atualIdx = lista.SelectedIndex;
         for (int i = 0; i < App.Cfg.Textos.Count; i++)
         {
@@ -1537,6 +1576,7 @@ class GerenciadorForm : Form
         lblTitulo.ForeColor = cTexto;
         lblAtalho.ForeColor = cTexto;
         lblConteudo.ForeColor = cTexto;
+        chkExibirTexto.ForeColor = cSub;
         lblModo.ForeColor = cTexto;
         rDigitar.ForeColor = cTexto;
         rColar.ForeColor = cTexto;
@@ -1676,10 +1716,16 @@ class GerenciadorForm : Form
         txtTitulo.Enabled = ok;
         txtAtalho.Enabled = ok;
         bPadraoAtalho.Enabled = ok;
+        chkExibirTexto.Enabled = ok;
         txtConteudo.Enabled = ok;
         bExcluir.Enabled = ok;
         bSubir.Enabled = ok && i > 0;
         bDescer.Enabled = ok && i < n - 1;
+
+        bool ocultar = ok && App.Cfg.Textos[i].OcultarTexto;
+        chkExibirTexto.Checked = !ocultar;
+        AplicarMascaraConteudo(ocultar);
+
         txtTitulo.Text = ok ? App.Cfg.Textos[i].Titulo : "";
         txtAtalho.Text = ok ? App.ObterAtalhoItem(i) : "";
         txtConteudo.Text = ok ? Normalizar(App.Cfg.Textos[i].Conteudo) : "";
