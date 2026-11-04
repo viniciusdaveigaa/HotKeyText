@@ -1,4 +1,4 @@
-// HotKeyText — aperte Scroll Lock e depois a tecla do texto (1-9, 0, A-Z) para inseri-lo.
+// HotKeyText — aperte Scroll Lock e depois a tecla/combinação do texto (ex.: 1, Shift+1, Alt+A) para inseri-lo.
 // Compilado com o compilador C# nativo do Windows (csc.exe), sem dependências externas.
 using System;
 using System.Collections.Generic;
@@ -17,15 +17,16 @@ using System.Xml.Serialization;
 using Microsoft.Win32;
 
 [assembly: AssemblyTitle("HotKeyText")]
-[assembly: AssemblyDescription("Atalho rápido de textos via Scroll Lock com atualização automática pelo GitHub")]
+[assembly: AssemblyDescription("Atalho rápido de textos via Scroll Lock com suporte a WTS/RDP e atualização pelo GitHub")]
 [assembly: AssemblyProduct("HotKeyText")]
-[assembly: AssemblyVersion("1.1.0.0")]
-[assembly: AssemblyFileVersion("1.1.0.0")]
+[assembly: AssemblyVersion("1.2.0.0")]
+[assembly: AssemblyFileVersion("1.2.0.0")]
 
 public class TextoItem
 {
     public string Titulo = "";
     public string Conteudo = "";
+    public string Atalho = ""; // Ex.: "1", "Shift+1", "Ctrl+Shift+2" (se vazio, usa o padrão da posição)
 }
 
 public class Config
@@ -67,6 +68,10 @@ static class Nativo
     [DllImport("kernel32.dll")] public static extern IntPtr GetModuleHandle(string name);
     [DllImport("user32.dll", SetLastError = true)] public static extern uint SendInput(uint n, INPUT[] inputs, int size);
     [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
+    [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int vKey);
+    [DllImport("user32.dll")] public static extern uint MapVirtualKey(uint uCode, uint uMapType);
     [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
     [DllImport("user32.dll")] public static extern bool AllowSetForegroundWindow(int pid);
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
@@ -77,7 +82,7 @@ static class Nativo
 
 static class App
 {
-    public const string VERSAO = "1.1.0";
+    public const string VERSAO = "1.2.0";
     // Repositório GitHub embutido automaticamente — sem qualquer configuração manual
     public const string GITHUB_REPO = "viniciusdaveigaa/HotKeyText";
 
@@ -92,6 +97,7 @@ static class App
     static Nativo.HookProc kbProc = KbCallback;
     static Nativo.HookProc msProc = MsCallback;
     public static bool PopupAberto = false;
+    public static bool CapturandoAtalho = false;
     static bool scrollPressionado = false;
     static HashSet<uint> engolir = new HashSet<uint>();
     static int digitando = 0;
@@ -167,6 +173,26 @@ static class App
                 MessageBox.Show("Não foi possível monitorar o teclado.", "HotKeyText", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
 
+            // Polling auxiliar para sessões WTS / Área de Trabalho Remota em tela cheia:
+            // quando o mstsc.exe captura o teclado antes do hook local, GetAsyncKeyState ainda detecta o Scroll Lock.
+            System.Windows.Forms.Timer timerWts = new System.Windows.Forms.Timer();
+            timerWts.Interval = 35;
+            timerWts.Tick += delegate
+            {
+                if (CapturandoAtalho) return;
+                bool down = (Nativo.GetAsyncKeyState(0x91) & 0x8000) != 0;
+                if (down && !scrollPressionado)
+                {
+                    scrollPressionado = true;
+                    if (PopupAberto) FecharPopup(); else AbrirPopup();
+                }
+                else if (!down && scrollPressionado)
+                {
+                    scrollPressionado = false;
+                }
+            };
+            timerWts.Start();
+
             Thread escuta = new Thread(delegate()
             {
                 while (true)
@@ -182,6 +208,7 @@ static class App
 
             Application.Run();
 
+            timerWts.Stop();
             DesligarMouse();
             if (kbHook != IntPtr.Zero) Nativo.UnhookWindowsHookEx(kbHook);
             tray.Visible = false;
@@ -253,6 +280,7 @@ static class App
                 XmlSerializer xs = new XmlSerializer(typeof(Config));
                 using (FileStream fs = File.OpenRead(ArquivoDados)) Cfg = (Config)xs.Deserialize(fs);
                 if (Cfg.Textos == null) Cfg.Textos = new List<TextoItem>();
+                foreach (TextoItem ti in Cfg.Textos) if (ti.Atalho == null) ti.Atalho = "";
                 return;
             }
             catch (Exception ex)
@@ -267,6 +295,7 @@ static class App
         TextoItem assinatura = new TextoItem();
         assinatura.Titulo = "Assinatura";
         assinatura.Conteudo = "Atenciosamente,\r\nVinícius.";
+        assinatura.Atalho = "1";
         Cfg.Textos.Add(assinatura);
         Salvar();
     }
@@ -312,24 +341,78 @@ static class App
         catch { }
     }
 
-    // ---------- teclas ----------
+    // ---------- teclas e atalhos customizáveis ----------
 
-    public static int IndiceDaTecla(uint vk)
-    {
-        if (vk >= 0x31 && vk <= 0x39) return (int)(vk - 0x31);     // 1-9
-        if (vk == 0x30) return 9;                                  // 0
-        if (vk >= 0x61 && vk <= 0x69) return (int)(vk - 0x61);     // teclado numérico 1-9
-        if (vk == 0x60) return 9;                                  // teclado numérico 0
-        if (vk >= 0x41 && vk <= 0x5A) return 10 + (int)(vk - 0x41); // A-Z
-        return -1;
-    }
-
-    public static string RotuloDoIndice(int i)
+    public static string AtalhoPadraoDoIndice(int i)
     {
         if (i < 9) return (i + 1).ToString();
         if (i == 9) return "0";
         if (i < 36) return ((char)('A' + i - 10)).ToString();
         return "";
+    }
+
+    public static string ObterAtalhoItem(int i)
+    {
+        if (i >= 0 && i < Cfg.Textos.Count)
+        {
+            string a = (Cfg.Textos[i].Atalho ?? "").Trim();
+            if (a.Length > 0) return a;
+        }
+        return AtalhoPadraoDoIndice(i);
+    }
+
+    public static string NomeDaTeclaBase(uint vk)
+    {
+        if (vk >= 0x30 && vk <= 0x39) return ((char)vk).ToString();
+        if (vk >= 0x60 && vk <= 0x69) return ((char)('0' + (vk - 0x60))).ToString();
+        if (vk >= 0x41 && vk <= 0x5A) return ((char)vk).ToString();
+        if (vk >= 0x70 && vk <= 0x7B) return "F" + (vk - 0x6F);
+        switch (vk)
+        {
+            case 0x20: return "Espaço";
+            case 0x09: return "Tab";
+            case 0xBD: case 0x6D: return "-";
+            case 0xBB: case 0x6B: return "=";
+            case 0xBC: return ",";
+            case 0xBE: case 0x6E: return ".";
+            case 0xBF: case 0x6F: return "/";
+            case 0xBA: return ";";
+            case 0xDB: return "[";
+            case 0xDD: return "]";
+        }
+        return "";
+    }
+
+    public static string FormatarCombinacao(bool ctrl, bool alt, bool shift, uint vk)
+    {
+        string baseKey = NomeDaTeclaBase(vk);
+        if (string.IsNullOrEmpty(baseKey)) return "";
+        StringBuilder sb = new StringBuilder();
+        if (ctrl) sb.Append("Ctrl+");
+        if (alt) sb.Append("Alt+");
+        if (shift) sb.Append("Shift+");
+        sb.Append(baseKey);
+        return sb.ToString();
+    }
+
+    static string CombinacaoAtualDoTeclado(uint vk)
+    {
+        bool ctrl  = (Nativo.GetAsyncKeyState(0x11) & 0x8000) != 0;
+        bool alt   = (Nativo.GetAsyncKeyState(0x12) & 0x8000) != 0;
+        bool shift = (Nativo.GetAsyncKeyState(0x10) & 0x8000) != 0;
+        return FormatarCombinacao(ctrl, alt, shift, vk);
+    }
+
+    public static int IndicePorAtalho(string combo)
+    {
+        if (string.IsNullOrEmpty(combo)) return -1;
+        for (int i = 0; i < Cfg.Textos.Count; i++)
+        {
+            string a = ObterAtalhoItem(i);
+            if (string.Equals(a, combo, StringComparison.OrdinalIgnoreCase))
+                return i;
+        }
+        return -1;
     }
 
     public static string TituloDe(TextoItem t)
@@ -349,7 +432,7 @@ static class App
         return c.Replace("\r\n", "\n").Replace("\r", "\n").Replace("\n", "  ↵  ").Replace("\t", " ");
     }
 
-    static bool EhModificador(uint vk)
+    public static bool EhModificador(uint vk)
     {
         return vk == 0x10 || vk == 0x11 || vk == 0x12 || (vk >= 0xA0 && vk <= 0xA5) || vk == 0x5B || vk == 0x5C || vk == 0x14;
     }
@@ -364,7 +447,7 @@ static class App
         if (nCode >= 0)
         {
             Nativo.KBDLLHOOKSTRUCT k = (Nativo.KBDLLHOOKSTRUCT)Marshal.PtrToStructure(lParam, typeof(Nativo.KBDLLHOOKSTRUCT));
-            if (k.extra != MARCA)
+            if (k.extra != MARCA && !CapturandoAtalho)
             {
                 int msg = wParam.ToInt32();
                 bool down = msg == 0x100 || msg == 0x104;
@@ -402,7 +485,9 @@ static class App
         if (vk == 0x26) { Postar(delegate { Popup.Mover(-1); }); return; }
         if (vk == 0x28) { Postar(delegate { Popup.Mover(1); }); return; }
         if (vk == 0x0D) { if (Popup.Destaque >= 0) Escolher(Popup.Destaque); return; }
-        int idx = IndiceDaTecla(vk);
+
+        string combo = CombinacaoAtualDoTeclado(vk);
+        int idx = IndicePorAtalho(combo);
         if (idx >= 0 && idx < Cfg.Textos.Count) Escolher(idx);
     }
 
@@ -428,6 +513,40 @@ static class App
     public static void DesligarMouse()
     {
         if (msHook != IntPtr.Zero) { Nativo.UnhookWindowsHookEx(msHook); msHook = IntPtr.Zero; }
+    }
+
+    // ---------- detecção de sessão WTS / RDP ----------
+
+    static bool JanelaAtivaEhWtsOuRemota()
+    {
+        try
+        {
+            IntPtr fg = Nativo.GetForegroundWindow();
+            if (fg == IntPtr.Zero) return false;
+
+            StringBuilder sb = new StringBuilder(128);
+            Nativo.GetClassName(fg, sb, sb.Capacity);
+            string cls = sb.ToString();
+            if (cls.IndexOf("TscShell", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                cls.IndexOf("IHWindowClass", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                cls.IndexOf("Transparent Windows Client", StringComparison.OrdinalIgnoreCase) >= 0)
+                return true;
+
+            uint pid;
+            Nativo.GetWindowThreadProcessId(fg, out pid);
+            if (pid != 0)
+            {
+                using (Process p = Process.GetProcessById((int)pid))
+                {
+                    string n = (p.ProcessName ?? "").ToLowerInvariant();
+                    if (n == "mstsc" || n == "msrdc" || n == "wfica32" || n == "cdviewer" ||
+                        n == "vmware-view" || n == "anydesk" || n == "teamviewer")
+                        return true;
+                }
+            }
+        }
+        catch { }
+        return false;
     }
 
     // ---------- ações ----------
@@ -456,8 +575,13 @@ static class App
         if (idx < 0 || idx >= Cfg.Textos.Count) return;
         string texto = Cfg.Textos[idx].Conteudo ?? "";
         if (texto.Length == 0) return;
-        if (Cfg.ModoColar) Colar(texto);
-        else ThreadPool.QueueUserWorkItem(delegate { Digitar(texto); });
+
+        // Em conexões WTS / Área de Trabalho Remota (mstsc), pacotes KEYEVENTF_UNICODE sem scanCode são ignorados pelo canal RDP.
+        // Por isso, quando a janela ativa é WTS/RDP ou o Modo Colar está ativo, usamos colagem sincronizada com ScanCode real.
+        if (Cfg.ModoColar || JanelaAtivaEhWtsOuRemota())
+            Colar(texto);
+        else
+            ThreadPool.QueueUserWorkItem(delegate { Digitar(texto); });
     }
 
     public static void AbrirGerenciador()
@@ -475,10 +599,20 @@ static class App
         Nativo.INPUT i = new Nativo.INPUT();
         i.type = 1;
         i.u.ki.wVk = vk;
+        if (scan == 0 && vk != 0)
+            scan = (ushort)Nativo.MapVirtualKey(vk, 0); // ScanCode de hardware para compatibilidade com WTS/RDP
         i.u.ki.wScan = scan;
         i.u.ki.dwFlags = flags;
         i.u.ki.extra = MARCA;
         return i;
+    }
+
+    static void SoltarModificadoresPresos(List<Nativo.INPUT> l)
+    {
+        const uint UP = 2;
+        if ((Nativo.GetAsyncKeyState(0x10) & 0x8000) != 0) { l.Add(Tecla(0x10, 0x2A, UP)); l.Add(Tecla(0xA0, 0x2A, UP)); l.Add(Tecla(0xA1, 0x36, UP)); }
+        if ((Nativo.GetAsyncKeyState(0x11) & 0x8000) != 0) { l.Add(Tecla(0x11, 0x1D, UP)); l.Add(Tecla(0xA2, 0x1D, UP)); }
+        if ((Nativo.GetAsyncKeyState(0x12) & 0x8000) != 0) { l.Add(Tecla(0x12, 0x38, UP)); l.Add(Tecla(0xA4, 0x38, UP)); }
     }
 
     static void Digitar(string texto)
@@ -488,17 +622,20 @@ static class App
         {
             const uint UP = 2, UNI = 4;
             List<Nativo.INPUT> l = new List<Nativo.INPUT>();
+            // Se o usuário disparou com Shift+1 ou Ctrl+1, garante que os modificadores não atrapalhem o texto
+            SoltarModificadoresPresos(l);
+
             foreach (char c in texto)
             {
                 if (c == '\r') continue;
                 if (c == '\n')
                 {
-                    l.Add(Tecla(0x10, 0, 0)); l.Add(Tecla(0x0D, 0, 0));
-                    l.Add(Tecla(0x0D, 0, UP)); l.Add(Tecla(0x10, 0, UP));
+                    l.Add(Tecla(0x10, 0x2A, 0)); l.Add(Tecla(0x0D, 0x1C, 0));
+                    l.Add(Tecla(0x0D, 0x1C, UP)); l.Add(Tecla(0x10, 0x2A, UP));
                 }
                 else if (c == '\t')
                 {
-                    l.Add(Tecla(0x09, 0, 0)); l.Add(Tecla(0x09, 0, UP));
+                    l.Add(Tecla(0x09, 0x0F, 0)); l.Add(Tecla(0x09, 0x0F, UP));
                 }
                 else
                 {
@@ -513,6 +650,7 @@ static class App
 
     static void Colar(string texto)
     {
+        bool ehWts = JanelaAtivaEhWtsOuRemota();
         texto = texto.Replace("\r\n", "\n").Replace("\n", "\r\n");
         DataObject backup = null;
         try
@@ -534,14 +672,24 @@ static class App
 
         ThreadPool.QueueUserWorkItem(delegate
         {
-            Nativo.INPUT[] i = { Tecla(0x11, 0, 0), Tecla(0x56, 0, 0), Tecla(0x56, 0, 2), Tecla(0x11, 0, 2) };
-            Nativo.SendInput((uint)i.Length, i, Marshal.SizeOf(typeof(Nativo.INPUT)));
+            // Em WTS/RDP, aguarda 140 ms para o canal rdpclip sincronizar a área de transferência local com o servidor remoto
+            if (ehWts) Thread.Sleep(140);
+            else Thread.Sleep(25);
+
+            List<Nativo.INPUT> l = new List<Nativo.INPUT>();
+            SoltarModificadoresPresos(l);
+            // Ctrl (scan 0x1D) + V (scan 0x2F) com ScanCode de hardware para funcionar dentro do WTS/RDP
+            l.Add(Tecla(0x11, 0x1D, 0));
+            l.Add(Tecla(0x56, 0x2F, 0));
+            l.Add(Tecla(0x56, 0x2F, 2));
+            l.Add(Tecla(0x11, 0x1D, 2));
+            Nativo.SendInput((uint)l.Count, l.ToArray(), Marshal.SizeOf(typeof(Nativo.INPUT)));
         });
 
         if (backup != null && backup.GetFormats().Length > 0)
         {
             System.Windows.Forms.Timer t = new System.Windows.Forms.Timer();
-            t.Interval = 700;
+            t.Interval = ehWts ? 1400 : 750;
             t.Tick += delegate
             {
                 t.Stop(); t.Dispose();
@@ -697,7 +845,7 @@ static class Atualizador
         ResultadoUpdate res = new ResultadoUpdate();
         try
         {
-            ServicePointManager.SecurityProtocol = (SecurityProtocolType)3072 | (SecurityProtocolType)768; // TLS 1.2 / 1.1
+            ServicePointManager.SecurityProtocol = (SecurityProtocolType)3072 | (SecurityProtocolType)768;
             string url = "https://api.github.com/repos/" + App.GITHUB_REPO + "/releases/latest";
             HttpWebRequest req = (HttpWebRequest)WebRequest.Create(url);
             req.UserAgent = "HotKeyText-Updater/" + App.VERSAO;
@@ -806,7 +954,7 @@ static class Atualizador
     }
 }
 
-// ---------- Lista flutuante do Scroll Lock (segue o Tema Claro/Escuro) ----------
+// ---------- Lista flutuante do Scroll Lock (segue o Tema Claro/Escuro e mostra o atalho customizado) ----------
 
 class PopupForm : Form
 {
@@ -832,7 +980,7 @@ class PopupForm : Form
         fCab = new Font("Segoe UI Semibold", 10.5f);
         fTitulo = new Font("Segoe UI Semibold", 10f);
         fPrev = new Font("Segoe UI", 9f);
-        fBadge = new Font("Segoe UI Semibold", 10.5f);
+        fBadge = new Font("Segoe UI Semibold", 9.5f);
         fRodape = new Font("Segoe UI", 8.5f);
         bmpLogo = App.DesenharLogo(P(22));
         try { int v = 2; Nativo.DwmSetWindowAttribute(Handle, 33, ref v, 4); } catch { }
@@ -862,7 +1010,7 @@ class PopupForm : Form
     {
         if (!App.PopupAberto) return;
         List<TextoItem> t = App.Cfg.Textos;
-        pad = P(10); linhaH = P(48); colW = P(420); cabecalhoH = P(40); rodapeH = P(36);
+        pad = P(10); linhaH = P(48); colW = P(440); cabecalhoH = P(40); rodapeH = P(36);
 
         IntPtr fg = Nativo.GetForegroundWindow();
         Screen tela = fg != IntPtr.Zero ? Screen.FromHandle(fg) : Screen.FromPoint(Cursor.Position);
@@ -938,9 +1086,10 @@ class PopupForm : Form
                 using (SolidBrush b = new SolidBrush(cHover))
                     g.FillPath(b, p);
 
-            int bs = P(28);
-            Rectangle rb = new Rectangle(r.X + P(8), r.Y + (r.Height - bs) / 2, bs, bs);
-            string rot = App.RotuloDoIndice(i);
+            string rot = App.ObterAtalhoItem(i);
+            int bh = P(28);
+            int bw = Math.Max(bh, TextRenderer.MeasureText(rot, fBadge).Width + P(12));
+            Rectangle rb = new Rectangle(r.X + P(8), r.Y + (r.Height - bh) / 2, bw, bh);
             using (GraphicsPath p = App.Arredondado(rb, P(5)))
             using (SolidBrush b = new SolidBrush(rot.Length > 0 ? Azul : cBorda))
                 g.FillPath(b, p);
@@ -957,7 +1106,7 @@ class PopupForm : Form
         Size sz = TextRenderer.MeasureText("Gerenciar", fRodape);
         rGerenciar = new Rectangle(Width - pad - P(8) - sz.Width, fy, sz.Width, rodapeH);
         TextRenderer.DrawText(g, "Gerenciar", fRodape, rGerenciar, cLink, centro);
-        TextRenderer.DrawText(g, "Tecla do texto, Enter ou clique para inserir  •  Esc fecha", fRodape,
+        TextRenderer.DrawText(g, "Atalho do texto, Enter ou clique para inserir  •  Esc fecha", fRodape,
             new Rectangle(pad + P(8), fy, rGerenciar.X - pad - P(16), rodapeH), cCinza, esq);
 
         using (Pen pen = new Pen(cBorda)) g.DrawRectangle(pen, 0, 0, Width - 1, Height - 1);
@@ -993,9 +1142,9 @@ class GerenciadorForm : Form
 {
     float S = 1f;
     ListBox lista;
-    TextBox txtTitulo, txtConteudo;
-    Button bNovo, bExcluir, bSubir, bDescer, bEngrenagem;
-    Label lblNomeApp, lblVersaoApp, lblStatusUpdate, lblLista, lblTitulo, lblConteudo, lblModo, dica;
+    TextBox txtTitulo, txtAtalho, txtConteudo;
+    Button bNovo, bExcluir, bSubir, bDescer, bPadraoAtalho, bEngrenagem;
+    Label lblNomeApp, lblVersaoApp, lblStatusUpdate, lblLista, lblTitulo, lblAtalho, lblConteudo, lblModo, dica;
     RadioButton rDigitar, rColar;
     CheckBox chkIniciar;
     ContextMenuStrip menuEngrenagem;
@@ -1019,10 +1168,10 @@ class GerenciadorForm : Form
         fHeader = new Font("Segoe UI Semibold", 13f);
         fItem = new Font("Segoe UI Semibold", 9.5f);
         fItemPrev = new Font("Segoe UI", 8.5f);
-        fBadge = new Font("Segoe UI Semibold", 9.5f);
+        fBadge = new Font("Segoe UI Semibold", 9f);
         StartPosition = FormStartPosition.CenterScreen;
-        ClientSize = new Size(P(880), P(600));
-        MinimumSize = new Size(P(680), P(480));
+        ClientSize = new Size(P(900), P(610));
+        MinimumSize = new Size(P(700), P(480));
 
         SuspendLayout();
 
@@ -1031,11 +1180,11 @@ class GerenciadorForm : Form
         raiz.ColumnCount = 2;
         raiz.RowCount = 3;
         raiz.Padding = new Padding(P(14));
-        raiz.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, P(300)));
+        raiz.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, P(320)));
         raiz.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        raiz.RowStyles.Add(new RowStyle(SizeType.AutoSize)); // cabeçalho com logo e versão
+        raiz.RowStyles.Add(new RowStyle(SizeType.AutoSize)); // cabeçalho
         raiz.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        raiz.RowStyles.Add(new RowStyle(SizeType.AutoSize)); // rodapé com engrenagem no canto inferior esquerdo
+        raiz.RowStyles.Add(new RowStyle(SizeType.AutoSize)); // rodapé com engrenagem
 
         // ----- barra superior: Logo + Nome + Versão + Status de atualização -----
         Panel topo = new Panel();
@@ -1112,16 +1261,26 @@ class GerenciadorForm : Form
         esq.Controls.Add(lista, 0, 1);
         esq.Controls.Add(botoes, 0, 2);
 
-        // ----- coluna direita: edição -----
+        // ----- coluna direita: Título + Atalho configurável + Conteúdo -----
         TableLayoutPanel dir = new TableLayoutPanel();
         dir.Dock = DockStyle.Fill;
         dir.ColumnCount = 1;
-        dir.RowCount = 4;
+        dir.RowCount = 3;
         dir.Margin = new Padding(0);
         dir.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         dir.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        dir.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         dir.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+
+        // Linha superior da direita: Título (esquerda) + Tecla de Atalho (direita)
+        TableLayoutPanel linhaTopoDir = new TableLayoutPanel();
+        linhaTopoDir.Dock = DockStyle.Fill;
+        linhaTopoDir.AutoSize = true;
+        linhaTopoDir.ColumnCount = 3;
+        linhaTopoDir.RowCount = 2;
+        linhaTopoDir.Margin = new Padding(0, 0, 0, P(12));
+        linhaTopoDir.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        linhaTopoDir.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, P(155)));
+        linhaTopoDir.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
 
         lblTitulo = new Label();
         lblTitulo.Text = "Título (aparece na lista)";
@@ -1129,11 +1288,51 @@ class GerenciadorForm : Form
         lblTitulo.AutoSize = true;
         lblTitulo.Margin = new Padding(0, 0, 0, P(4));
 
+        lblAtalho = new Label();
+        lblAtalho.Text = "Atalho (ex: 1, Shift+1)";
+        lblAtalho.Font = fNegrito;
+        lblAtalho.AutoSize = true;
+        lblAtalho.Margin = new Padding(P(10), 0, 0, P(4));
+
         txtTitulo = new TextBox();
-        txtTitulo.Anchor = AnchorStyles.Left | AnchorStyles.Right;
+        txtTitulo.Dock = DockStyle.Fill;
         txtTitulo.BorderStyle = BorderStyle.FixedSingle;
-        txtTitulo.Margin = new Padding(0, 0, 0, P(14));
+        txtTitulo.Margin = new Padding(0, P(2), 0, 0);
         txtTitulo.TextChanged += AoEditarTitulo;
+
+        txtAtalho = new TextBox();
+        txtAtalho.Dock = DockStyle.Fill;
+        txtAtalho.ReadOnly = true;
+        txtAtalho.BorderStyle = BorderStyle.FixedSingle;
+        txtAtalho.TextAlign = HorizontalAlignment.Center;
+        txtAtalho.Font = fNegrito;
+        txtAtalho.Cursor = Cursors.Hand;
+        txtAtalho.Margin = new Padding(P(10), P(2), P(6), 0);
+        ToolTip tipAtalho = new ToolTip();
+        tipAtalho.SetToolTip(txtAtalho, "Clique aqui e pressione a tecla ou combinação desejada (ex.: 1, Shift+1, Alt+2)");
+        txtAtalho.Enter += delegate { App.CapturandoAtalho = true; };
+        txtAtalho.Leave += delegate { App.CapturandoAtalho = false; };
+        txtAtalho.KeyDown += AoCapturarAtalho;
+
+        bPadraoAtalho = Botao("Padrão");
+        bPadraoAtalho.Margin = new Padding(0, 0, 0, 0);
+        tipAtalho.SetToolTip(bPadraoAtalho, "Restaurar atalho padrão da posição (1–9, 0, A–Z)");
+        bPadraoAtalho.Click += delegate
+        {
+            TextoItem t = Atual();
+            if (t == null) return;
+            t.Atalho = "";
+            txtAtalho.Text = App.ObterAtalhoItem(lista.SelectedIndex);
+            lista.Invalidate();
+            App.Salvar();
+        };
+
+        linhaTopoDir.Controls.Add(lblTitulo, 0, 0);
+        linhaTopoDir.Controls.Add(lblAtalho, 1, 0);
+        linhaTopoDir.SetColumnSpan(lblAtalho, 2);
+        linhaTopoDir.Controls.Add(txtTitulo, 0, 1);
+        linhaTopoDir.Controls.Add(txtAtalho, 1, 1);
+        linhaTopoDir.Controls.Add(bPadraoAtalho, 2, 1);
 
         lblConteudo = new Label();
         lblConteudo.Text = "Texto que será inserido";
@@ -1160,10 +1359,9 @@ class GerenciadorForm : Form
         txtTitulo.KeyDown += selecionarTudo;
         txtConteudo.KeyDown += selecionarTudo;
 
-        dir.Controls.Add(lblTitulo, 0, 0);
-        dir.Controls.Add(txtTitulo, 0, 1);
-        dir.Controls.Add(lblConteudo, 0, 2);
-        dir.Controls.Add(txtConteudo, 0, 3);
+        dir.Controls.Add(linhaTopoDir, 0, 0);
+        dir.Controls.Add(lblConteudo, 0, 1);
+        dir.Controls.Add(txtConteudo, 0, 2);
 
         // ----- rodapé: Engrenagem no canto inferior esquerdo + opções -----
         TableLayoutPanel rodape = new TableLayoutPanel();
@@ -1175,7 +1373,6 @@ class GerenciadorForm : Form
         rodape.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         rodape.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
 
-        // Menu da engrenagem (Tema: Claro / Escuro + Procurar Atualização)
         menuEngrenagem = new ContextMenuStrip();
         ToolStripMenuItem menuTema = new ToolStripMenuItem("Tema");
         itemTemaClaro = new ToolStripMenuItem("Claro", null, delegate { DefinirTema(false); });
@@ -1213,10 +1410,10 @@ class GerenciadorForm : Form
         lblModo.Margin = new Padding(0, P(5), P(4), 0);
 
         rDigitar = new RadioButton();
-        rDigitar.Text = "Digitar (padrão)";
+        rDigitar.Text = "Digitar (padrão; usa Colar automaticamente em WTS/RDP)";
         rDigitar.AutoSize = true;
         rColar = new RadioButton();
-        rColar.Text = "Colar pela área de transferência (melhor para textos longos)";
+        rColar.Text = "Sempre colar pela área de transferência";
         rColar.AutoSize = true;
         rColar.Margin = new Padding(P(4), P(3), P(24), P(3));
         chkIniciar = new CheckBox();
@@ -1226,7 +1423,7 @@ class GerenciadorForm : Form
         dica = new Label();
         dica.AutoSize = true;
         dica.Margin = new Padding(0, P(6), 0, 0);
-        dica.Text = "Como usar: em qualquer programa, aperte Scroll Lock e depois a tecla do texto (1–9, 0, A–Z), Enter ou clique nele. Esc fecha.";
+        dica.Text = "Como usar: aperte Scroll Lock e depois o atalho do texto (ex.: 1, Shift+1, Ctrl+2), Enter ou clique nele. Esc fecha.";
 
         opcoes.Controls.AddRange(new Control[] { lblModo, rDigitar, rColar, chkIniciar, dica });
         opcoes.SetFlowBreak(chkIniciar, true);
@@ -1258,10 +1455,48 @@ class GerenciadorForm : Form
         timerSalvar.Interval = 600;
         timerSalvar.Tick += delegate { timerSalvar.Stop(); App.Salvar(); };
 
-        FormClosing += delegate { timerSalvar.Stop(); App.Salvar(); };
+        FormClosing += delegate { App.CapturandoAtalho = false; timerSalvar.Stop(); App.Salvar(); };
 
         AplicarTema();
         Recarregar(App.Cfg.Textos.Count > 0 ? 0 : -1);
+    }
+
+    void AoCapturarAtalho(object sender, KeyEventArgs e)
+    {
+        e.SuppressKeyPress = true;
+        e.Handled = true;
+        TextoItem t = Atual();
+        if (t == null) return;
+
+        uint vk = (uint)e.KeyCode;
+        if (vk == 0x08 || vk == 0x2E) // Backspace ou Delete restaura o padrão
+        {
+            t.Atalho = "";
+            txtAtalho.Text = App.ObterAtalhoItem(lista.SelectedIndex);
+            lista.Invalidate();
+            App.Salvar();
+            return;
+        }
+
+        if (App.EhModificador(vk) || vk == 0x1B || vk == 0x0D || vk == 0x91) return;
+
+        string combo = App.FormatarCombinacao(e.Control, e.Alt, e.Shift, vk);
+        if (string.IsNullOrEmpty(combo)) return;
+
+        // Garante que não haja outro item usando o mesmo atalho
+        int atualIdx = lista.SelectedIndex;
+        for (int i = 0; i < App.Cfg.Textos.Count; i++)
+        {
+            if (i != atualIdx && string.Equals(App.ObterAtalhoItem(i), combo, StringComparison.OrdinalIgnoreCase))
+            {
+                App.Cfg.Textos[i].Atalho = App.AtalhoPadraoDoIndice(i);
+            }
+        }
+
+        t.Atalho = combo;
+        txtAtalho.Text = combo;
+        lista.Invalidate();
+        App.Salvar();
     }
 
     void DefinirTema(bool escuro)
@@ -1281,7 +1516,7 @@ class GerenciadorForm : Form
         try
         {
             int darkVal = esc ? 1 : 0;
-            Nativo.DwmSetWindowAttribute(Handle, 20, ref darkVal, 4); // barra de título escura/clara no Windows 10/11
+            Nativo.DwmSetWindowAttribute(Handle, 20, ref darkVal, 4);
         }
         catch { }
 
@@ -1300,6 +1535,7 @@ class GerenciadorForm : Form
         lblStatusUpdate.ForeColor = esc ? Color.FromArgb(100, 175, 255) : Azul;
         lblLista.ForeColor = cTexto;
         lblTitulo.ForeColor = cTexto;
+        lblAtalho.ForeColor = cTexto;
         lblConteudo.ForeColor = cTexto;
         lblModo.ForeColor = cTexto;
         rDigitar.ForeColor = cTexto;
@@ -1313,10 +1549,12 @@ class GerenciadorForm : Form
 
         txtTitulo.BackColor = cPainel;
         txtTitulo.ForeColor = cTexto;
+        txtAtalho.BackColor = cPainel;
+        txtAtalho.ForeColor = esc ? Color.FromArgb(110, 185, 255) : Azul;
         txtConteudo.BackColor = cPainel;
         txtConteudo.ForeColor = cTexto;
 
-        foreach (Button b in new Button[] { bNovo, bExcluir, bSubir, bDescer })
+        foreach (Button b in new Button[] { bNovo, bExcluir, bSubir, bDescer, bPadraoAtalho })
         {
             b.FlatStyle = FlatStyle.Flat;
             b.BackColor = cBotao;
@@ -1436,11 +1674,14 @@ class GerenciadorForm : Form
         bool ok = i >= 0 && i < n;
         carregando = true;
         txtTitulo.Enabled = ok;
+        txtAtalho.Enabled = ok;
+        bPadraoAtalho.Enabled = ok;
         txtConteudo.Enabled = ok;
         bExcluir.Enabled = ok;
         bSubir.Enabled = ok && i > 0;
         bDescer.Enabled = ok && i < n - 1;
         txtTitulo.Text = ok ? App.Cfg.Textos[i].Titulo : "";
+        txtAtalho.Text = ok ? App.ObterAtalhoItem(i) : "";
         txtConteudo.Text = ok ? Normalizar(App.Cfg.Textos[i].Conteudo) : "";
         carregando = false;
     }
@@ -1527,9 +1768,10 @@ class GerenciadorForm : Form
         if (sel) using (SolidBrush b = new SolidBrush(Azul)) g.FillRectangle(b, r.X, r.Y, P(3), r.Height);
 
         TextoItem t = App.Cfg.Textos[e.Index];
-        string rot = App.RotuloDoIndice(e.Index);
-        int bs = P(26);
-        Rectangle rb = new Rectangle(r.X + P(12), r.Y + (r.Height - bs) / 2, bs, bs);
+        string rot = App.ObterAtalhoItem(e.Index);
+        int bh = P(26);
+        int bw = Math.Max(bh, TextRenderer.MeasureText(rot, fBadge).Width + P(10));
+        Rectangle rb = new Rectangle(r.X + P(12), r.Y + (r.Height - bh) / 2, bw, bh);
         using (GraphicsPath p = App.Arredondado(rb, P(5)))
         using (SolidBrush b = new SolidBrush(rot.Length > 0 ? Azul : Color.Silver))
             g.FillPath(b, p);
